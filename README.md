@@ -4,6 +4,8 @@ This is an extension of the standard [Go](http://golang.org) package with the sa
 
 ## Maturity
 
+[![Build Status](https://travis-ci.org/agext/regexp.svg?branch=master)](https://travis-ci.org/agext/regexp)
+
 Stable: no known bugs or performance issues introduced by the added code.
 
 ## Overview
