@@ -1,6 +1,6 @@
 # Extended `regexp` package for Go (golang)
 
-This is an extension of the standard [Go](http://golang.org) package with the same name. It is modified copy that can be used as a simple drop-in replacement, being 100% backwards-compatible with the standard package. It adds new methods to the `Regexp` type to allow for more efficient processing of submatches.
+This is an extension of the standard [Go](http://golang.org) package with the same name. It is a modified copy that can be used as a simple drop-in replacement, being 100% backwards-compatible with the standard package. It adds new methods to the `Regexp` type to allow for more efficient processing of submatches.
 
 ## Maturity
 
