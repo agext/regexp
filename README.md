@@ -10,6 +10,8 @@ Stable: no known bugs or performance issues introduced by the added code.
 
 ## Overview
 
+[![GoDoc](https://godoc.org/github.com/agext/regexp?status.png)](https://godoc.org/github.com/agext/regexp)
+
 This package provides the following additional methods on the `Regexp` type:
 
 ### `FindNamed` and `FindStringNamed`
