@@ -6,9 +6,13 @@ This is an extension of the standard [Go](http://golang.org) package with the sa
 
 [![Build Status](https://travis-ci.org/agext/regexp.svg?branch=master)](https://travis-ci.org/agext/regexp)
 
-v1.1 Stable: Guaranteed no breaking changes to the API in future v1.x releases. No known bugs or performance issues introduced by the added code. Probably safe to use in production, though provided on "AS IS" basis.
+v1.2 Stable: Guaranteed no breaking changes to the API in future v1.x releases. No known bugs or performance issues introduced by the added code. Probably safe to use in production, though provided on "AS IS" basis.
 
 This package is being actively maintained. If you encounter any problems or have any suggestions for improvement, please [open an issue](https://github.com/agext/regexp/issues). Pull requests are welcome.
+
+**Note on failing test for older versions (and possibly tip)**
+
+The `TestFoldConstants` in syntax/parse_test.go depends on the standard `unicode/utf8` package. This test fails when this package is used with a Go version in which the unicode/utf8 package handles different folding ranges (new ranges are added from time to time, as unicode/utf8 is refined). The behavior of agext/regexp will be the one you expect from your Go version, based on its unicode/utf8 package, so it is safe to ignore this failing test.
 
 ## Overview
 

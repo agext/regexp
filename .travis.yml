@@ -41,6 +41,11 @@ matrix:
   fast_finish: true
   allow_failures:
     - go: tip
+    - go: 1.6.4
+    - go: 1.6.3
+    - go: 1.6.2
+    - go: 1.6.1
+    - go: 1.6
     - go: 1.5.4
     - go: 1.5.3
     - go: 1.5.2
