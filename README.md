@@ -11,7 +11,7 @@ This is an extension of the standard [Go](http://golang.org) package with the sa
 
 ## Maturity
 
-v1.2 Stable: Guaranteed no breaking changes to the API in future v1.x releases. No known bugs or performance issues introduced by the added code. Probably safe to use in production, though provided on "AS IS" basis.
+v1.3.0 Stable: Guaranteed no breaking changes to the API in future v1.x releases. No known bugs or performance issues introduced by the added code. Probably safe to use in production, though provided on "AS IS" basis.
 
 This package is being actively maintained. If you encounter any problems or have any suggestions for improvement, please [open an issue](https://github.com/agext/regexp/issues). Pull requests are welcome.
 

@@ -16,7 +16,7 @@
 // (This is a property not guaranteed by most open source
 // implementations of regular expressions.) For more information
 // about this property, see
-//	http://swtch.com/~rsc/regexp/regexp1.html
+//	https://swtch.com/~rsc/regexp/regexp1.html
 // or any book about automata theory.
 //
 // All characters are UTF-8-encoded code points.
@@ -30,8 +30,8 @@
 // matches of the entire expression. Empty matches abutting a preceding
 // match are ignored. The return value is a slice containing the successive
 // return values of the corresponding non-'All' routine. These routines take
-// an extra integer argument, n; if n >= 0, the function returns at most n
-// matches/submatches.
+// an extra integer argument, n. If n >= 0, the function returns at most n
+// matches/submatches; otherwise, it returns all of them.
 //
 // If 'String' is present, the argument is a string; otherwise it is a slice
 // of bytes; return values are adjusted as appropriate.
@@ -50,9 +50,10 @@
 // If 'Index' is present, matches and submatches are identified by byte index
 // pairs within the input string: result[2*n:2*n+1] identifies the indexes of
 // the nth submatch. The pair for n==0 identifies the match of the entire
-// expression. If 'Index' is not present, the match is identified by the
-// text of the match/submatch. If an index is negative, it means that
-// subexpression did not match any string in the input.
+// expression. If 'Index' is not present, the match is identified by the text
+// of the match/submatch. If an index is negative or text is nil, it means that
+// subexpression did not match any string in the input. For 'String' versions
+// an empty string means either no match or an empty match.
 //
 // There is also a subset of the methods that can be applied to text read
 // from a RuneReader:
@@ -81,30 +82,28 @@ import (
 )
 
 // Regexp is the representation of a compiled regular expression.
-// A Regexp is safe for concurrent use by multiple goroutines.
+// A Regexp is safe for concurrent use by multiple goroutines,
+// except for configuration methods, such as Longest.
 type Regexp struct {
-	// read-only after Compile
-	regexpRO
-
-	// cache of machines for running regexp
-	mu      sync.Mutex
-	machine []*machine
-}
-
-type regexpRO struct {
-	expr           string         // as passed to Compile
-	prog           *syntax.Prog   // compiled program
-	onepass        *onePassProg   // onepass program or nil
+	expr           string       // as passed to Compile
+	prog           *syntax.Prog // compiled program
+	onepass        *onePassProg // onepass program or nil
+	numSubexp      int
+	maxBitStateLen int
+	subexpNames    []string
 	prefix         string         // required prefix in unanchored matches
 	prefixBytes    []byte         // prefix, as a []byte
-	prefixComplete bool           // prefix is the entire regexp
 	prefixRune     rune           // first rune in prefix
 	prefixEnd      uint32         // pc for last rune in prefix
+	mpool          int            // pool for machines
+	matchcap       int            // size of recorded match lengths
+	prefixComplete bool           // prefix is the entire regexp
 	cond           syntax.EmptyOp // empty-width conditions required at start of match
-	numSubexp      int
-	subexpNames    []string
-	namedSubexp    map[string]int
-	longest        bool
+	minInputLen    int            // minimum length of the input in bytes
+
+	// This field can be modified by the Longest method,
+	// but it is otherwise read-only.
+	longest bool // whether regexp prefers leftmost-longest match
 }
 
 // String returns the source text used to compile the regular expression.
@@ -113,15 +112,16 @@ func (re *Regexp) String() string {
 }
 
 // Copy returns a new Regexp object copied from re.
+// Calling Longest on one copy does not affect another.
 //
-// When using a Regexp in multiple goroutines, giving each goroutine
-// its own copy helps to avoid lock contention.
+// Deprecated: In earlier releases, when using a Regexp in multiple goroutines,
+// giving each goroutine its own copy helped to avoid lock contention.
+// As of Go 1.12, using Copy is no longer necessary to avoid lock contention.
+// Copy may still be appropriate if the reason for its use is to make
+// two copies with different Longest settings.
 func (re *Regexp) Copy() *Regexp {
-	// It is not safe to copy Regexp by value
-	// since it contains a sync.Mutex.
-	return &Regexp{
-		regexpRO: re.regexpRO,
-	}
+	re2 := *re
+	return &re2
 }
 
 // Compile parses a regular expression and returns, if successful,
@@ -156,7 +156,7 @@ func Compile(expr string) (*Regexp, error) {
 // specifies that the match be chosen to maximize the length of the first
 // subexpression, then the second, and so on from left to right.
 // The POSIX rule is computationally prohibitive and not even well-defined.
-// See http://swtch.com/~rsc/regexp/regexp2.html#posix for details.
+// See https://swtch.com/~rsc/regexp/regexp2.html#posix for details.
 func CompilePOSIX(expr string) (*Regexp, error) {
 	return compile(expr, syntax.POSIX, true)
 }
@@ -165,6 +165,8 @@ func CompilePOSIX(expr string) (*Regexp, error) {
 // That is, when matching against text, the regexp returns a match that
 // begins as early as possible in the input (leftmost), and among those
 // it chooses a match that is as long as possible.
+// This method modifies the Regexp and may not be called concurrently
+// with any other methods.
 func (re *Regexp) Longest() {
 	re.longest = true
 }
@@ -182,24 +184,24 @@ func compile(expr string, mode syntax.Flags, longest bool) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
+	matchcap := prog.NumCap
+	if matchcap < 2 {
+		matchcap = 2
+	}
 	regexp := &Regexp{
-		regexpRO: regexpRO{
-			expr:        expr,
-			prog:        prog,
-			onepass:     compileOnePass(prog),
-			numSubexp:   maxCap,
-			subexpNames: capNames,
-			namedSubexp: make(map[string]int, len(capNames)),
-			cond:        prog.StartCond(),
-			longest:     longest,
-		},
+		expr:        expr,
+		prog:        prog,
+		onepass:     compileOnePass(prog),
+		numSubexp:   maxCap,
+		subexpNames: capNames,
+		cond:        prog.StartCond(),
+		longest:     longest,
+		matchcap:    matchcap,
+		minInputLen: minInputLen(re),
 	}
-	for i, name := range capNames {
-		regexp.namedSubexp[name] = 2 * i
-	}
-	regexp.namedSubexp[""] = 0
-	if regexp.onepass == notOnePass {
+	if regexp.onepass == nil {
 		regexp.prefix, regexp.prefixComplete = prog.Prefix()
+		regexp.maxBitStateLen = maxBitStateLen(prog)
 	} else {
 		regexp.prefix, regexp.prefixComplete, regexp.prefixEnd = onePassPrefix(prog)
 	}
@@ -209,43 +211,109 @@ func compile(expr string, mode syntax.Flags, longest bool) (*Regexp, error) {
 		regexp.prefixBytes = []byte(regexp.prefix)
 		regexp.prefixRune, _ = utf8.DecodeRuneInString(regexp.prefix)
 	}
+
+	n := len(prog.Inst)
+	i := 0
+	for matchSize[i] != 0 && matchSize[i] < n {
+		i++
+	}
+	regexp.mpool = i
+
 	return regexp, nil
 }
+
+// Pools of *machine for use during (*Regexp).doExecute,
+// split up by the size of the execution queues.
+// matchPool[i] machines have queue size matchSize[i].
+// On a 64-bit system each queue entry is 16 bytes,
+// so matchPool[0] has 16*2*128 = 4kB queues, etc.
+// The final matchPool is a catch-all for very large queues.
+var (
+	matchSize = [...]int{128, 512, 2048, 16384, 0}
+	matchPool [len(matchSize)]sync.Pool
+)
 
 // get returns a machine to use for matching re.
 // It uses the re's machine cache if possible, to avoid
 // unnecessary allocation.
 func (re *Regexp) get() *machine {
-	re.mu.Lock()
-	if n := len(re.machine); n > 0 {
-		z := re.machine[n-1]
-		re.machine = re.machine[:n-1]
-		re.mu.Unlock()
-		return z
+	m, ok := matchPool[re.mpool].Get().(*machine)
+	if !ok {
+		m = new(machine)
 	}
-	re.mu.Unlock()
-	z := progMachine(re.prog, re.onepass)
-	z.re = re
-	return z
+	m.re = re
+	m.p = re.prog
+	if cap(m.matchcap) < re.matchcap {
+		m.matchcap = make([]int, re.matchcap)
+		for _, t := range m.pool {
+			t.cap = make([]int, re.matchcap)
+		}
+	}
+
+	// Allocate queues if needed.
+	// Or reallocate, for "large" match pool.
+	n := matchSize[re.mpool]
+	if n == 0 { // large pool
+		n = len(re.prog.Inst)
+	}
+	if len(m.q0.sparse) < n {
+		m.q0 = queue{make([]uint32, n), make([]entry, 0, n)}
+		m.q1 = queue{make([]uint32, n), make([]entry, 0, n)}
+	}
+	return m
 }
 
-// put returns a machine to the re's machine cache.
-// There is no attempt to limit the size of the cache, so it will
-// grow to the maximum number of simultaneous matches
-// run using re.  (The cache empties when re gets garbage collected.)
-func (re *Regexp) put(z *machine) {
-	re.mu.Lock()
-	re.machine = append(re.machine, z)
-	re.mu.Unlock()
+// put returns a machine to the correct machine pool.
+func (re *Regexp) put(m *machine) {
+	m.re = nil
+	m.p = nil
+	m.inputs.clear()
+	matchPool[re.mpool].Put(m)
+}
+
+// minInputLen walks the regexp to find the minimum length of any matchable input
+func minInputLen(re *syntax.Regexp) int {
+	switch re.Op {
+	default:
+		return 0
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL, syntax.OpCharClass:
+		return 1
+	case syntax.OpLiteral:
+		l := 0
+		for _, r := range re.Rune {
+			l += utf8.RuneLen(r)
+		}
+		return l
+	case syntax.OpCapture, syntax.OpPlus:
+		return minInputLen(re.Sub[0])
+	case syntax.OpRepeat:
+		return re.Min * minInputLen(re.Sub[0])
+	case syntax.OpConcat:
+		l := 0
+		for _, sub := range re.Sub {
+			l += minInputLen(sub)
+		}
+		return l
+	case syntax.OpAlternate:
+		l := minInputLen(re.Sub[0])
+		var lnext int
+		for _, sub := range re.Sub[1:] {
+			lnext = minInputLen(sub)
+			if lnext < l {
+				l = lnext
+			}
+		}
+		return l
+	}
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.
 // It simplifies safe initialization of global variables holding compiled regular
 // expressions.
 func MustCompile(str string) *Regexp {
-	regexp, error := Compile(str)
-	if error != nil {
-		panic(`regexp: Compile(` + quote(str) + `): ` + error.Error())
+	regexp, err := Compile(str)
+	if err != nil {
+		panic(`regexp: Compile(` + quote(str) + `): ` + err.Error())
 	}
 	return regexp
 }
@@ -254,9 +322,9 @@ func MustCompile(str string) *Regexp {
 // It simplifies safe initialization of global variables holding compiled regular
 // expressions.
 func MustCompilePOSIX(str string) *Regexp {
-	regexp, error := CompilePOSIX(str)
-	if error != nil {
-		panic(`regexp: CompilePOSIX(` + quote(str) + `): ` + error.Error())
+	regexp, err := CompilePOSIX(str)
+	if err != nil {
+		panic(`regexp: CompilePOSIX(` + quote(str) + `): ` + err.Error())
 	}
 	return regexp
 }
@@ -291,7 +359,7 @@ type input interface {
 	canCheckPrefix() bool             // can we look ahead without losing info?
 	hasPrefix(re *Regexp) bool
 	index(re *Regexp, pos int) int
-	context(pos int) syntax.EmptyOp
+	context(pos int) lazyFlag
 }
 
 // inputString scans a string.
@@ -322,15 +390,23 @@ func (i *inputString) index(re *Regexp, pos int) int {
 	return strings.Index(i.str[pos:], re.prefix)
 }
 
-func (i *inputString) context(pos int) syntax.EmptyOp {
+func (i *inputString) context(pos int) lazyFlag {
 	r1, r2 := endOfText, endOfText
-	if pos > 0 && pos <= len(i.str) {
-		r1, _ = utf8.DecodeLastRuneInString(i.str[:pos])
+	// 0 < pos && pos <= len(i.str)
+	if uint(pos-1) < uint(len(i.str)) {
+		r1 = rune(i.str[pos-1])
+		if r1 >= utf8.RuneSelf {
+			r1, _ = utf8.DecodeLastRuneInString(i.str[:pos])
+		}
 	}
-	if pos < len(i.str) {
-		r2, _ = utf8.DecodeRuneInString(i.str[pos:])
+	// 0 <= pos && pos < len(i.str)
+	if uint(pos) < uint(len(i.str)) {
+		r2 = rune(i.str[pos])
+		if r2 >= utf8.RuneSelf {
+			r2, _ = utf8.DecodeRuneInString(i.str[pos:])
+		}
 	}
-	return syntax.EmptyOpContext(r1, r2)
+	return newLazyFlag(r1, r2)
 }
 
 // inputBytes scans a byte slice.
@@ -361,15 +437,23 @@ func (i *inputBytes) index(re *Regexp, pos int) int {
 	return bytes.Index(i.str[pos:], re.prefixBytes)
 }
 
-func (i *inputBytes) context(pos int) syntax.EmptyOp {
+func (i *inputBytes) context(pos int) lazyFlag {
 	r1, r2 := endOfText, endOfText
-	if pos > 0 && pos <= len(i.str) {
-		r1, _ = utf8.DecodeLastRune(i.str[:pos])
+	// 0 < pos && pos <= len(i.str)
+	if uint(pos-1) < uint(len(i.str)) {
+		r1 = rune(i.str[pos-1])
+		if r1 >= utf8.RuneSelf {
+			r1, _ = utf8.DecodeLastRune(i.str[:pos])
+		}
 	}
-	if pos < len(i.str) {
-		r2, _ = utf8.DecodeRune(i.str[pos:])
+	// 0 <= pos && pos < len(i.str)
+	if uint(pos) < uint(len(i.str)) {
+		r2 = rune(i.str[pos])
+		if r2 >= utf8.RuneSelf {
+			r2, _ = utf8.DecodeRune(i.str[pos:])
+		}
 	}
-	return syntax.EmptyOpContext(r1, r2)
+	return newLazyFlag(r1, r2)
 }
 
 // inputReader scans a RuneReader.
@@ -405,8 +489,8 @@ func (i *inputReader) index(re *Regexp, pos int) int {
 	return -1
 }
 
-func (i *inputReader) context(pos int) syntax.EmptyOp {
-	return 0
+func (i *inputReader) context(pos int) lazyFlag {
+	return 0 // not used
 }
 
 // LiteralPrefix returns a literal string that must begin any match
@@ -416,25 +500,27 @@ func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return re.prefix, re.prefixComplete
 }
 
-// MatchReader reports whether the Regexp matches the text read by the
-// RuneReader.
+// MatchReader reports whether the text returned by the RuneReader
+// contains any match of the regular expression re.
 func (re *Regexp) MatchReader(r io.RuneReader) bool {
-	return re.doExecute(r, nil, "", 0, 0) != nil
+	return re.doMatch(r, nil, "")
 }
 
-// MatchString reports whether the Regexp matches the string s.
+// MatchString reports whether the string s
+// contains any match of the regular expression re.
 func (re *Regexp) MatchString(s string) bool {
-	return re.doExecute(nil, nil, s, 0, 0) != nil
+	return re.doMatch(nil, nil, s)
 }
 
-// Match reports whether the Regexp matches the byte slice b.
+// Match reports whether the byte slice b
+// contains any match of the regular expression re.
 func (re *Regexp) Match(b []byte) bool {
-	return re.doExecute(nil, b, "", 0, 0) != nil
+	return re.doMatch(nil, b, "")
 }
 
-// MatchReader checks whether a textual regular expression matches the text
-// read by the RuneReader. More complicated queries need to use Compile and
-// the full Regexp interface.
+// MatchReader reports whether the text returned by the RuneReader
+// contains any match of the regular expression pattern.
+// More complicated queries need to use Compile and the full Regexp interface.
 func MatchReader(pattern string, r io.RuneReader) (matched bool, err error) {
 	re, err := Compile(pattern)
 	if err != nil {
@@ -443,9 +529,9 @@ func MatchReader(pattern string, r io.RuneReader) (matched bool, err error) {
 	return re.MatchReader(r), nil
 }
 
-// MatchString checks whether a textual regular expression
-// matches a string. More complicated queries need
-// to use Compile and the full Regexp interface.
+// MatchString reports whether the string s
+// contains any match of the regular expression pattern.
+// More complicated queries need to use Compile and the full Regexp interface.
 func MatchString(pattern string, s string) (matched bool, err error) {
 	re, err := Compile(pattern)
 	if err != nil {
@@ -454,9 +540,9 @@ func MatchString(pattern string, s string) (matched bool, err error) {
 	return re.MatchString(s), nil
 }
 
-// Match checks whether a textual regular expression
-// matches a byte slice. More complicated queries need
-// to use Compile and the full Regexp interface.
+// Match reports whether the byte slice b
+// contains any match of the regular expression pattern.
+// More complicated queries need to use Compile and the full Regexp interface.
 func Match(pattern string, b []byte) (matched bool, err error) {
 	re, err := Compile(pattern)
 	if err != nil {
@@ -470,7 +556,7 @@ func Match(pattern string, b []byte) (matched bool, err error) {
 // in Expand, so for instance $1 represents the text of the first submatch.
 func (re *Regexp) ReplaceAllString(src, repl string) string {
 	n := 2
-	if strings.Index(repl, "$") >= 0 {
+	if strings.Contains(repl, "$") {
 		n = 2 * (re.numSubexp + 1)
 	}
 	b := re.replaceAll(nil, src, n, func(dst []byte, match []int) []byte {
@@ -513,8 +599,9 @@ func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst 
 		nmatch = re.prog.NumCap
 	}
 
+	var dstCap [2]int
 	for searchPos <= endPos {
-		a := re.doExecute(nil, bsrc, src, searchPos, nmatch)
+		a := re.doExecute(nil, bsrc, src, searchPos, nmatch, dstCap[:0])
 		if len(a) == 0 {
 			break // no more matches
 		}
@@ -600,21 +687,40 @@ func (re *Regexp) ReplaceAllFunc(src []byte, repl func([]byte) []byte) []byte {
 	})
 }
 
-var specialBytes = []byte(`\.+*?()|[]{}^$`)
+// Bitmap used by func special to check whether a character needs to be escaped.
+var specialBytes [16]byte
 
+// special reports whether byte b needs to be escaped by QuoteMeta.
 func special(b byte) bool {
-	return bytes.IndexByte(specialBytes, b) >= 0
+	return b < utf8.RuneSelf && specialBytes[b%16]&(1<<(b/16)) != 0
 }
 
-// QuoteMeta returns a string that quotes all regular expression metacharacters
-// inside the argument text; the returned string is a regular expression matching
-// the literal text. For example, QuoteMeta(`[foo]`) returns `\[foo\]`.
-func QuoteMeta(s string) string {
-	b := make([]byte, 2*len(s))
+func init() {
+	for _, b := range []byte(`\.+*?()|[]{}^$`) {
+		specialBytes[b%16] |= 1 << (b / 16)
+	}
+}
 
+// QuoteMeta returns a string that escapes all regular expression metacharacters
+// inside the argument text; the returned string is a regular expression matching
+// the literal text.
+func QuoteMeta(s string) string {
 	// A byte loop is correct because all metacharacters are ASCII.
-	j := 0
-	for i := 0; i < len(s); i++ {
+	var i int
+	for i = 0; i < len(s); i++ {
+		if special(s[i]) {
+			break
+		}
+	}
+	// No meta characters found, so return original string.
+	if i >= len(s) {
+		return s
+	}
+
+	b := make([]byte, 2*len(s)-i)
+	copy(b, s[:i])
+	j := i
+	for ; i < len(s); i++ {
 		if special(s[i]) {
 			b[j] = '\\'
 			j++
@@ -622,7 +728,7 @@ func QuoteMeta(s string) string {
 		b[j] = s[i]
 		j++
 	}
-	return string(b[0:j])
+	return string(b[:j])
 }
 
 // The number of capture values in the program may correspond
@@ -642,7 +748,9 @@ func (re *Regexp) pad(a []int) []int {
 	return a
 }
 
-// Find matches in slice b if b is non-nil, otherwise find matches in string s.
+// allMatches calls deliver at most n times
+// with the location of successive matches in the input text.
+// The input text is b if non-nil, otherwise s.
 func (re *Regexp) allMatches(s string, b []byte, n int, deliver func([]int)) {
 	var end int
 	if b == nil {
@@ -652,7 +760,7 @@ func (re *Regexp) allMatches(s string, b []byte, n int, deliver func([]int)) {
 	}
 
 	for pos, i, prevMatchEnd := 0, 0, -1; i < n && pos <= end; {
-		matches := re.doExecute(nil, b, s, pos, re.prog.NumCap)
+		matches := re.doExecute(nil, b, s, pos, re.prog.NumCap, nil)
 		if len(matches) == 0 {
 			break
 		}
@@ -692,11 +800,12 @@ func (re *Regexp) allMatches(s string, b []byte, n int, deliver func([]int)) {
 // Find returns a slice holding the text of the leftmost match in b of the regular expression.
 // A return value of nil indicates no match.
 func (re *Regexp) Find(b []byte) []byte {
-	a := re.doExecute(nil, b, "", 0, 2)
+	var dstCap [2]int
+	a := re.doExecute(nil, b, "", 0, 2, dstCap[:0])
 	if a == nil {
 		return nil
 	}
-	return b[a[0]:a[1]]
+	return b[a[0]:a[1]:a[1]]
 }
 
 // FindIndex returns a two-element slice of integers defining the location of
@@ -704,7 +813,7 @@ func (re *Regexp) Find(b []byte) []byte {
 // b[loc[0]:loc[1]].
 // A return value of nil indicates no match.
 func (re *Regexp) FindIndex(b []byte) (loc []int) {
-	a := re.doExecute(nil, b, "", 0, 2)
+	a := re.doExecute(nil, b, "", 0, 2, nil)
 	if a == nil {
 		return nil
 	}
@@ -717,7 +826,8 @@ func (re *Regexp) FindIndex(b []byte) (loc []int) {
 // an empty string. Use FindStringIndex or FindStringSubmatch if it is
 // necessary to distinguish these cases.
 func (re *Regexp) FindString(s string) string {
-	a := re.doExecute(nil, nil, s, 0, 2)
+	var dstCap [2]int
+	a := re.doExecute(nil, nil, s, 0, 2, dstCap[:0])
 	if a == nil {
 		return ""
 	}
@@ -729,7 +839,7 @@ func (re *Regexp) FindString(s string) string {
 // itself is at s[loc[0]:loc[1]].
 // A return value of nil indicates no match.
 func (re *Regexp) FindStringIndex(s string) (loc []int) {
-	a := re.doExecute(nil, nil, s, 0, 2)
+	a := re.doExecute(nil, nil, s, 0, 2, nil)
 	if a == nil {
 		return nil
 	}
@@ -742,7 +852,7 @@ func (re *Regexp) FindStringIndex(s string) (loc []int) {
 // byte offset loc[0] through loc[1]-1.
 // A return value of nil indicates no match.
 func (re *Regexp) FindReaderIndex(r io.RuneReader) (loc []int) {
-	a := re.doExecute(r, nil, "", 0, 2)
+	a := re.doExecute(r, nil, "", 0, 2, nil)
 	if a == nil {
 		return nil
 	}
@@ -755,14 +865,15 @@ func (re *Regexp) FindReaderIndex(r io.RuneReader) (loc []int) {
 // comment.
 // A return value of nil indicates no match.
 func (re *Regexp) FindSubmatch(b []byte) [][]byte {
-	a := re.doExecute(nil, b, "", 0, re.prog.NumCap)
+	var dstCap [4]int
+	a := re.doExecute(nil, b, "", 0, re.prog.NumCap, dstCap[:0])
 	if a == nil {
 		return nil
 	}
 	ret := make([][]byte, 1+re.numSubexp)
 	for i := range ret {
 		if 2*i < len(a) && a[2*i] >= 0 {
-			ret[i] = b[a[2*i]:a[2*i+1]]
+			ret[i] = b[a[2*i]:a[2*i+1]:a[2*i+1]]
 		}
 	}
 	return ret
@@ -902,7 +1013,7 @@ func extract(str string) (name string, num int, rest string, ok bool) {
 // in the package comment.
 // A return value of nil indicates no match.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	return re.pad(re.doExecute(nil, b, "", 0, re.prog.NumCap))
+	return re.pad(re.doExecute(nil, b, "", 0, re.prog.NumCap, nil))
 }
 
 // FindStringSubmatch returns a slice of strings holding the text of the
@@ -911,7 +1022,8 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 // package comment.
 // A return value of nil indicates no match.
 func (re *Regexp) FindStringSubmatch(s string) []string {
-	a := re.doExecute(nil, nil, s, 0, re.prog.NumCap)
+	var dstCap [4]int
+	a := re.doExecute(nil, nil, s, 0, re.prog.NumCap, dstCap[:0])
 	if a == nil {
 		return nil
 	}
@@ -930,7 +1042,7 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 // 'Index' descriptions in the package comment.
 // A return value of nil indicates no match.
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
-	return re.pad(re.doExecute(nil, nil, s, 0, re.prog.NumCap))
+	return re.pad(re.doExecute(nil, nil, s, 0, re.prog.NumCap, nil))
 }
 
 // FindReaderSubmatchIndex returns a slice holding the index pairs
@@ -939,7 +1051,7 @@ func (re *Regexp) FindStringSubmatchIndex(s string) []int {
 // by the 'Submatch' and 'Index' descriptions in the package comment. A
 // return value of nil indicates no match.
 func (re *Regexp) FindReaderSubmatchIndex(r io.RuneReader) []int {
-	return re.pad(re.doExecute(r, nil, "", 0, re.prog.NumCap))
+	return re.pad(re.doExecute(r, nil, "", 0, re.prog.NumCap, nil))
 }
 
 const startSize = 10 // The size at which to start a slice in the 'All' routines.
@@ -952,13 +1064,13 @@ func (re *Regexp) FindAll(b []byte, n int) [][]byte {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	result := make([][]byte, 0, startSize)
+	var result [][]byte
 	re.allMatches("", b, n, func(match []int) {
-		result = append(result, b[match[0]:match[1]])
+		if result == nil {
+			result = make([][]byte, 0, startSize)
+		}
+		result = append(result, b[match[0]:match[1]:match[1]])
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -970,13 +1082,13 @@ func (re *Regexp) FindAllIndex(b []byte, n int) [][]int {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	result := make([][]int, 0, startSize)
+	var result [][]int
 	re.allMatches("", b, n, func(match []int) {
+		if result == nil {
+			result = make([][]int, 0, startSize)
+		}
 		result = append(result, match[0:2])
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -988,13 +1100,13 @@ func (re *Regexp) FindAllString(s string, n int) []string {
 	if n < 0 {
 		n = len(s) + 1
 	}
-	result := make([]string, 0, startSize)
+	var result []string
 	re.allMatches(s, nil, n, func(match []int) {
+		if result == nil {
+			result = make([]string, 0, startSize)
+		}
 		result = append(result, s[match[0]:match[1]])
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -1006,13 +1118,13 @@ func (re *Regexp) FindAllStringIndex(s string, n int) [][]int {
 	if n < 0 {
 		n = len(s) + 1
 	}
-	result := make([][]int, 0, startSize)
+	var result [][]int
 	re.allMatches(s, nil, n, func(match []int) {
+		if result == nil {
+			result = make([][]int, 0, startSize)
+		}
 		result = append(result, match[0:2])
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -1024,19 +1136,19 @@ func (re *Regexp) FindAllSubmatch(b []byte, n int) [][][]byte {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	result := make([][][]byte, 0, startSize)
+	var result [][][]byte
 	re.allMatches("", b, n, func(match []int) {
+		if result == nil {
+			result = make([][][]byte, 0, startSize)
+		}
 		slice := make([][]byte, len(match)/2)
 		for j := range slice {
 			if match[2*j] >= 0 {
-				slice[j] = b[match[2*j]:match[2*j+1]]
+				slice[j] = b[match[2*j]:match[2*j+1]:match[2*j+1]]
 			}
 		}
 		result = append(result, slice)
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -1048,13 +1160,13 @@ func (re *Regexp) FindAllSubmatchIndex(b []byte, n int) [][]int {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	result := make([][]int, 0, startSize)
+	var result [][]int
 	re.allMatches("", b, n, func(match []int) {
+		if result == nil {
+			result = make([][]int, 0, startSize)
+		}
 		result = append(result, match)
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -1066,8 +1178,11 @@ func (re *Regexp) FindAllStringSubmatch(s string, n int) [][]string {
 	if n < 0 {
 		n = len(s) + 1
 	}
-	result := make([][]string, 0, startSize)
+	var result [][]string
 	re.allMatches(s, nil, n, func(match []int) {
+		if result == nil {
+			result = make([][]string, 0, startSize)
+		}
 		slice := make([]string, len(match)/2)
 		for j := range slice {
 			if match[2*j] >= 0 {
@@ -1076,9 +1191,6 @@ func (re *Regexp) FindAllStringSubmatch(s string, n int) [][]string {
 		}
 		result = append(result, slice)
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 
@@ -1091,13 +1203,13 @@ func (re *Regexp) FindAllStringSubmatchIndex(s string, n int) [][]int {
 	if n < 0 {
 		n = len(s) + 1
 	}
-	result := make([][]int, 0, startSize)
+	var result [][]int
 	re.allMatches(s, nil, n, func(match []int) {
+		if result == nil {
+			result = make([][]int, 0, startSize)
+		}
 		result = append(result, match)
 	})
-	if len(result) == 0 {
-		return nil
-	}
 	return result
 }
 

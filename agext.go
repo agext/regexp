@@ -22,14 +22,14 @@ package regexp
 // corresponding matched texts).
 // A return value of nil indicates no match.
 func (re *Regexp) FindNamed(src []byte) map[string][]byte {
-	match := re.doExecute(nil, src, "", 0, re.prog.NumCap)
-	if match == nil {
+	match := re.doExecute(nil, src, "", 0, re.prog.NumCap, nil)
+	if len(match) == 0 {
 		return nil
 	}
-	result := make(map[string][]byte, len(re.namedSubexp))
-	for name, i := range re.namedSubexp {
-		if i+1 < len(match) && match[i] >= 0 {
-			result[name] = src[match[i]:match[i+1]]
+	result := make(map[string][]byte, len(re.subexpNames))
+	for i, name := range re.subexpNames {
+		if (i == 0 || name != "") && 2*i+1 < len(match) && match[2*i] >= 0 {
+			result[name] = src[match[2*i]:match[2*i+1]]
 		}
 	}
 	return result
@@ -41,14 +41,14 @@ func (re *Regexp) FindNamed(src []byte) map[string][]byte {
 // corresponding matched texts).
 // If there is no match, the return value is nil.
 func (re *Regexp) FindStringNamed(src string) map[string]string {
-	match := re.doExecute(nil, nil, src, 0, re.prog.NumCap)
-	if match == nil {
+	match := re.doExecute(nil, nil, src, 0, re.prog.NumCap, nil)
+	if len(match) == 0 {
 		return nil
 	}
-	result := make(map[string]string, len(re.namedSubexp))
-	for name, i := range re.namedSubexp {
-		if i+1 < len(match) && match[i] >= 0 {
-			result[name] = src[match[i]:match[i+1]]
+	result := make(map[string]string, len(re.subexpNames))
+	for i, name := range re.subexpNames {
+		if (i == 0 || name != "") && 2*i+1 < len(match) && match[2*i] >= 0 {
+			result[name] = src[match[2*i]:match[2*i+1]]
 		}
 	}
 	return result
@@ -64,10 +64,10 @@ func (re *Regexp) FindAllNamed(src []byte, n int) []map[string][]byte {
 	}
 	matches := make([]map[string][]byte, 0, startSize)
 	re.allMatches("", src, n, func(match []int) {
-		result := make(map[string][]byte, len(re.namedSubexp))
-		for name, i := range re.namedSubexp {
-			if i+1 < len(match) && match[i] >= 0 {
-				result[name] = src[match[i]:match[i+1]]
+		result := make(map[string][]byte, len(re.subexpNames))
+		for i, name := range re.subexpNames {
+			if (i == 0 || name != "") && 2*i+1 < len(match) && match[2*i] >= 0 {
+				result[name] = src[match[2*i]:match[2*i+1]]
 			}
 		}
 		matches = append(matches, result)
@@ -88,10 +88,10 @@ func (re *Regexp) FindAllStringNamed(src string, n int) []map[string]string {
 	}
 	matches := make([]map[string]string, 0, startSize)
 	re.allMatches(src, nil, n, func(match []int) {
-		result := make(map[string]string, len(re.namedSubexp))
-		for name, i := range re.namedSubexp {
-			if i+1 < len(match) && match[i] >= 0 {
-				result[name] = src[match[i]:match[i+1]]
+		result := make(map[string]string, len(re.subexpNames))
+		for i, name := range re.subexpNames {
+			if (i == 0 || name != "") && 2*i+1 < len(match) && match[2*i] >= 0 {
+				result[name] = src[match[2*i]:match[2*i+1]]
 			}
 		}
 		matches = append(matches, result)
@@ -141,10 +141,10 @@ func (re *Regexp) ReplaceAllSubmatchFunc(src []byte, repl func([][]byte) []byte)
 // directly, without using Expand.
 func (re *Regexp) ReplaceAllStringNamedFunc(src string, repl func(map[string]string) string) string {
 	b := re.replaceAll(nil, src, 2*(re.numSubexp+1), func(dst []byte, match []int) []byte {
-		matches := make(map[string]string, len(re.namedSubexp))
-		for name, i := range re.namedSubexp {
-			if i+1 < len(match) && match[i] >= 0 {
-				matches[name] = src[match[i]:match[i+1]]
+		matches := make(map[string]string, len(re.subexpNames))
+		for i, name := range re.subexpNames {
+			if (i == 0 || name != "") && 2*i+1 < len(match) && match[2*i] >= 0 {
+				matches[name] = src[match[2*i]:match[2*i+1]]
 			}
 		}
 		return append(dst, repl(matches)...)
@@ -158,10 +158,10 @@ func (re *Regexp) ReplaceAllStringNamedFunc(src string, repl func(map[string]str
 // directly, without using Expand.
 func (re *Regexp) ReplaceAllNamedFunc(src []byte, repl func(map[string][]byte) []byte) []byte {
 	return re.replaceAll(src, "", 2*(re.numSubexp+1), func(dst []byte, match []int) []byte {
-		matches := make(map[string][]byte, len(re.namedSubexp))
-		for name, i := range re.namedSubexp {
-			if i+1 < len(match) && match[i] >= 0 {
-				matches[name] = src[match[i]:match[i+1]]
+		matches := make(map[string][]byte, len(re.subexpNames))
+		for i, name := range re.subexpNames {
+			if (i == 0 || name != "") && 2*i+1 < len(match) && match[2*i] >= 0 {
+				matches[name] = src[match[2*i]:match[2*i+1]]
 			}
 		}
 		return append(dst, repl(matches)...)

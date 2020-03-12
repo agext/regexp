@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"compress/bzip2"
 	"fmt"
-	"github.com/agext/regexp/syntax"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/agext/regexp/syntax"
 )
 
 // TestRE2 tests this package's regexp API against test cases
@@ -659,9 +660,14 @@ func makeText(n int) []byte {
 }
 
 func BenchmarkMatch(b *testing.B) {
+	isRaceBuilder := strings.HasSuffix(os.Getenv("GO_BUILDER_NAME"), "-race")
+
 	for _, data := range benchData {
 		r := MustCompile(data.re)
 		for _, size := range benchSizes {
+			if (isRaceBuilder || testing.Short()) && size.n > 1<<10 {
+				continue
+			}
 			t := makeText(size.n)
 			b.Run(data.name+"/"+size.name, func(b *testing.B) {
 				b.SetBytes(int64(size.n))
@@ -672,6 +678,29 @@ func BenchmarkMatch(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+func BenchmarkMatch_onepass_regex(b *testing.B) {
+	isRaceBuilder := strings.HasSuffix(os.Getenv("GO_BUILDER_NAME"), "-race")
+	r := MustCompile(`(?s)\A.*\z`)
+	if r.onepass == nil {
+		b.Fatalf("want onepass regex, but %q is not onepass", r)
+	}
+	for _, size := range benchSizes {
+		if (isRaceBuilder || testing.Short()) && size.n > 1<<10 {
+			continue
+		}
+		t := makeText(size.n)
+		b.Run(size.name, func(b *testing.B) {
+			b.SetBytes(int64(size.n))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if !r.Match(t) {
+					b.Fatal("not match!")
+				}
+			}
+		})
 	}
 }
 
@@ -688,6 +717,7 @@ var benchSizes = []struct {
 	name string
 	n    int
 }{
+	{"16", 16},
 	{"32", 32},
 	{"1K", 1 << 10},
 	{"32K", 32 << 10},

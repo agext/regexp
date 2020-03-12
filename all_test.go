@@ -5,13 +5,15 @@
 package regexp
 
 import (
-	"github.com/agext/regexp/syntax"
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/agext/regexp/syntax"
 )
 
-var good_re = []string{
+var goodRe = []string{
 	``,
 	`.`,
 	`^.$`,
@@ -36,7 +38,7 @@ type stringError struct {
 	err string
 }
 
-var bad_re = []stringError{
+var badRe = []stringError{
 	{`*`, "missing argument to repetition operator: `*`"},
 	{`+`, "missing argument to repetition operator: `+`"},
 	{`?`, "missing argument to repetition operator: `?`"},
@@ -64,14 +66,14 @@ func compileTest(t *testing.T, expr string, error string) *Regexp {
 }
 
 func TestGoodCompile(t *testing.T) {
-	for i := 0; i < len(good_re); i++ {
-		compileTest(t, good_re[i], "")
+	for i := 0; i < len(goodRe); i++ {
+		compileTest(t, goodRe[i], "")
 	}
 }
 
 func TestBadCompile(t *testing.T) {
-	for i := 0; i < len(bad_re); i++ {
-		compileTest(t, bad_re[i].re, bad_re[i].err)
+	for i := 0; i < len(badRe); i++ {
+		compileTest(t, badRe[i].re, badRe[i].err)
 	}
 }
 
@@ -354,6 +356,7 @@ type MetaTest struct {
 var metaTests = []MetaTest{
 	{``, ``, ``, true},
 	{`foo`, `foo`, `foo`, true},
+	{`日本語+`, `日本語\+`, `日本語`, false},
 	{`foo\.\$`, `foo\\\.\\\$`, `foo.$`, true}, // has meta but no operator
 	{`foo.\$`, `foo\.\\\$`, `foo`, false},     // has escaped operators and real operators
 	{`!@#$%^&*()_+-=[{]}\|,<.>/?~`, `!@#\$%\^&\*\(\)_\+-=\[\{\]\}\\\|,<\.>/\?~`, `!@#`, false},
@@ -512,6 +515,32 @@ func TestSplit(t *testing.T) {
 	}
 }
 
+// The following sequence of Match calls used to panic. See issue #12980.
+func TestParseAndCompile(t *testing.T) {
+	expr := "a$"
+	s := "a\nb"
+
+	for i, tc := range []struct {
+		reFlags  syntax.Flags
+		expMatch bool
+	}{
+		{syntax.Perl | syntax.OneLine, false},
+		{syntax.Perl &^ syntax.OneLine, true},
+	} {
+		parsed, err := syntax.Parse(expr, tc.reFlags)
+		if err != nil {
+			t.Fatalf("%d: parse: %v", i, err)
+		}
+		re, err := Compile(parsed.String())
+		if err != nil {
+			t.Fatalf("%d: compile: %v", i, err)
+		}
+		if match := re.MatchString(s); match != tc.expMatch {
+			t.Errorf("%d: %q.MatchString(%q)=%t; expected=%t", i, re, s, match, tc.expMatch)
+		}
+	}
+}
+
 // Check that one-pass cutoff does trigger.
 func TestOnePassCutoff(t *testing.T) {
 	re, err := syntax.Parse(`^x{1,1000}y{1,1000}$`, syntax.Perl)
@@ -522,8 +551,8 @@ func TestOnePassCutoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if compileOnePass(p) != notOnePass {
-		t.Fatalf("makeOnePass succeeded; wanted notOnePass")
+	if compileOnePass(p) != nil {
+		t.Fatalf("makeOnePass succeeded; wanted nil")
 	}
 }
 
@@ -536,6 +565,85 @@ func TestSwitchBacktrack(t *testing.T) {
 	// The following sequence of Match calls used to panic. See issue #10319.
 	re.Match(long)     // triggers standard matcher
 	re.Match(long[:1]) // triggers backtracker
+}
+
+func BenchmarkFind(b *testing.B) {
+	b.StopTimer()
+	re := MustCompile("a+b+")
+	wantSubs := "aaabb"
+	s := []byte("acbb" + wantSubs + "dd")
+	b.StartTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		subs := re.Find(s)
+		if string(subs) != wantSubs {
+			b.Fatalf("Find(%q) = %q; want %q", s, subs, wantSubs)
+		}
+	}
+}
+
+func BenchmarkFindAllNoMatches(b *testing.B) {
+	re := MustCompile("a+b+")
+	s := []byte("acddee")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		all := re.FindAll(s, -1)
+		if all != nil {
+			b.Fatalf("FindAll(%q) = %q; want nil", s, all)
+		}
+	}
+}
+
+func BenchmarkFindString(b *testing.B) {
+	b.StopTimer()
+	re := MustCompile("a+b+")
+	wantSubs := "aaabb"
+	s := "acbb" + wantSubs + "dd"
+	b.StartTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		subs := re.FindString(s)
+		if subs != wantSubs {
+			b.Fatalf("FindString(%q) = %q; want %q", s, subs, wantSubs)
+		}
+	}
+}
+
+func BenchmarkFindSubmatch(b *testing.B) {
+	b.StopTimer()
+	re := MustCompile("a(a+b+)b")
+	wantSubs := "aaabb"
+	s := []byte("acbb" + wantSubs + "dd")
+	b.StartTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		subs := re.FindSubmatch(s)
+		if string(subs[0]) != wantSubs {
+			b.Fatalf("FindSubmatch(%q)[0] = %q; want %q", s, subs[0], wantSubs)
+		}
+		if string(subs[1]) != "aab" {
+			b.Fatalf("FindSubmatch(%q)[1] = %q; want %q", s, subs[1], "aab")
+		}
+	}
+}
+
+func BenchmarkFindStringSubmatch(b *testing.B) {
+	b.StopTimer()
+	re := MustCompile("a(a+b+)b")
+	wantSubs := "aaabb"
+	s := "acbb" + wantSubs + "dd"
+	b.StartTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		subs := re.FindStringSubmatch(s)
+		if subs[0] != wantSubs {
+			b.Fatalf("FindStringSubmatch(%q)[0] = %q; want %q", s, subs[0], wantSubs)
+		}
+		if subs[1] != "aab" {
+			b.Fatalf("FindStringSubmatch(%q)[1] = %q; want %q", s, subs[1], "aab")
+		}
+	}
 }
 
 func BenchmarkLiteral(b *testing.B) {
@@ -725,4 +833,100 @@ func BenchmarkMatchParallelCopied(b *testing.B) {
 			re.Match(x)
 		}
 	})
+}
+
+var sink string
+
+func BenchmarkQuoteMetaAll(b *testing.B) {
+	specials := make([]byte, 0)
+	for i := byte(0); i < utf8.RuneSelf; i++ {
+		if special(i) {
+			specials = append(specials, i)
+		}
+	}
+	s := string(specials)
+	b.SetBytes(int64(len(s)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sink = QuoteMeta(s)
+	}
+}
+
+func BenchmarkQuoteMetaNone(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyz"
+	b.SetBytes(int64(len(s)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sink = QuoteMeta(s)
+	}
+}
+
+var compileBenchData = []struct{ name, re string }{
+	{"Onepass", `^a.[l-nA-Cg-j]?e$`},
+	{"Medium", `^((a|b|[d-z0-9])*(日){4,5}.)+$`},
+	{"Hard", strings.Repeat(`((abc)*|`, 50) + strings.Repeat(`)`, 50)},
+}
+
+func BenchmarkCompile(b *testing.B) {
+	for _, data := range compileBenchData {
+		b.Run(data.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := Compile(data.re); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestDeepEqual(t *testing.T) {
+	re1 := MustCompile("a.*b.*c.*d")
+	re2 := MustCompile("a.*b.*c.*d")
+	if !reflect.DeepEqual(re1, re2) { // has always been true, since Go 1.
+		t.Errorf("DeepEqual(re1, re2) = false, want true")
+	}
+
+	re1.MatchString("abcdefghijklmn")
+	if !reflect.DeepEqual(re1, re2) {
+		t.Errorf("DeepEqual(re1, re2) = false, want true")
+	}
+
+	re2.MatchString("abcdefghijklmn")
+	if !reflect.DeepEqual(re1, re2) {
+		t.Errorf("DeepEqual(re1, re2) = false, want true")
+	}
+
+	re2.MatchString(strings.Repeat("abcdefghijklmn", 100))
+	if !reflect.DeepEqual(re1, re2) {
+		t.Errorf("DeepEqual(re1, re2) = false, want true")
+	}
+}
+
+var minInputLenTests = []struct {
+	Regexp string
+	min    int
+}{
+	{``, 0},
+	{`a`, 1},
+	{`aa`, 2},
+	{`(aa)a`, 3},
+	{`(?:aa)a`, 3},
+	{`a?a`, 1},
+	{`(aaa)|(aa)`, 2},
+	{`(aa)+a`, 3},
+	{`(aa)*a`, 1},
+	{`(aa){3,5}`, 6},
+	{`[a-z]`, 1},
+	{`日`, 3},
+}
+
+func TestMinInputLen(t *testing.T) {
+	for _, tt := range minInputLenTests {
+		re, _ := syntax.Parse(tt.Regexp, syntax.Perl)
+		m := minInputLen(re)
+		if m != tt.min {
+			t.Errorf("regexp %#q has minInputLen %d, should be %d", tt.Regexp, m, tt.min)
+		}
+	}
 }
